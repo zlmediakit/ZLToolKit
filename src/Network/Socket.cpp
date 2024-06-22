@@ -267,71 +267,97 @@ bool Socket::attachEvent(const SockNum::Ptr &sock) {
     return -1 != result;
 }
 
-class SocketBuffer {
+class MMsgBuffer {
 public:
-    SocketBuffer(size_t count, size_t size)
-        : _iovec_array(count)
-        , _addr_array(count)
-        , _buf_array(count) {
+#if !defined(__linux)
+    struct mmsghdr {
+        struct msghdr msg_hdr; /* Message header */
+        unsigned int msg_len; /* Number of received bytes for header */
+    };
+#endif
+
+    MMsgBuffer(size_t count, size_t size)
+        : _iovec(count)
+        , _mmsgs(count)
+        , _buffers(count)
+        , _address(count) {
         for (auto i = 0u; i < count; ++i) {
-            auto &buf = _buf_array[i];
+            auto &buf = _buffers[i];
             buf = BufferRaw::create();
-            // 多预留一个字节
-            buf->setCapacity(size + 1);
-            _iovec_array[i].iov_base = buf->data();
-            _iovec_array[i].iov_len = size;
-        }
+            buf->setCapacity(size);
 
-        memset(&msg, 0, sizeof msg);
-        msg.msg_iov = &_iovec_array[0];
-        msg.msg_iovlen = count;
-        msg.msg_name = &_addr_array[0];
-        msg.msg_namelen = count;
+            auto &mmsg = _mmsgs[i];
+            auto &addr = _address[i];
+            mmsg.msg_len = 0;
+            mmsg.msg_hdr.msg_name = &addr;
+            mmsg.msg_hdr.msg_namelen = sizeof(addr);
+            mmsg.msg_hdr.msg_iov = &_iovec[i];
+            mmsg.msg_hdr.msg_iov->iov_base = buf->data();
+            mmsg.msg_hdr.msg_iov->iov_len = buf->getCapacity() - 1;
+            mmsg.msg_hdr.msg_iovlen = 1;
+            mmsg.msg_hdr.msg_control = nullptr;
+            mmsg.msg_hdr.msg_controllen = 0;
+            mmsg.msg_hdr.msg_flags = 0;
+        }
     }
 
-    struct msghdr &getMsgHdr() { return msg; }
-    const BufferRaw::Ptr &getBuffer(size_t index) const { return _buf_array[index]; }
-    struct sockaddr_storage &getAddr(size_t index) { return _addr_array[index]; }
-
-    // 返回buffer个数
-    size_t setTotalSize(size_t size) {
-        size_t total = 0u;
-        size_t index = 0u;
-        for (; index < _iovec_array.size(); ++index) {
-            auto &io = _iovec_array[index];
-            auto &buf = _buf_array[index];
-            auto sz = io.iov_len;
-            total += sz;
-            if (total >= size) {
-                sz -= total - size;
-                buf->setSize(sz);
-                return index + 1;
-            }
-            buf->setSize(sz);
+    ssize_t recvFromSocket(int fd, ssize_t &count) {
+        for (auto &mmsg : _mmsgs) {
+            mmsg.msg_hdr.msg_namelen = sizeof(struct sockaddr_storage);
         }
-        // 不可达
-        throw std::invalid_argument("invalid total size: " + std::to_string(size));
+        do {
+            count = recvmmsg(fd, &_mmsgs[0], _mmsgs.size(), 0, nullptr);
+        } while (-1 == count && UV_EINTR == get_uv_error(true));
+
+        if (count <= 0) {
+            return count;
+        }
+
+        ssize_t nread = 0;
+        for (auto i = 0; i < count; ++i) {
+            auto &mmsg = _mmsgs[i];
+            nread += mmsg.msg_len;
+
+            auto &buf = _buffers[i];
+            buf->setSize(mmsg.msg_len);
+            buf->data()[mmsg.msg_len] = '\0';
+        }
+        return nread;
     }
+
+    const BufferRaw::Ptr &getBuffer(size_t index) const { return _buffers[index]; }
+
+    const struct sockaddr_storage &getAddress(size_t index) const { return _address[index]; }
 
 private:
-    struct msghdr msg;
-    std::vector<struct iovec> _iovec_array;
-    std::vector<struct sockaddr_storage> _addr_array;
-    std::vector<BufferRaw::Ptr> _buf_array;
+#if !defined(__linux)
+    int recvmmsg(int sockfd, struct mmsghdr *msgvec, unsigned int, int flags, struct timespec *) {
+        auto sz = recvmsg(sockfd, &(msgvec->msg_hdr), flags);
+        if (sz > 0) {
+            msgvec->msg_len = sz;
+            return 1;
+        }
+        return sz;
+    }
+#endif
+
+private:
+    std::vector<struct iovec> _iovec;
+    std::vector<struct mmsghdr> _mmsgs;
+    std::vector<BufferRaw::Ptr> _buffers;
+    std::vector<struct sockaddr_storage> _address;
 };
 
-static constexpr auto kPacketSize = 64u;
+static constexpr auto kPacketSize = 32;
 static constexpr auto kBufferCapacity = 4 * 1024u;
 
 ssize_t Socket::onRead(const SockNum::Ptr &sock, const BufferRaw::Ptr &) noexcept {
-    SocketBuffer buffer(kPacketSize,kBufferCapacity);
+    static thread_local MMsgBuffer buffer(kPacketSize,kBufferCapacity);
 
-    ssize_t ret = 0, nread = 0;
+    ssize_t ret = 0, nread = 0, count = 0;
+
     while (_enable_recv) {
-        do {
-            nread = recvmsg(sock->rawFd(), &buffer.getMsgHdr(), 0);
-        } while (-1 == nread && UV_EINTR == get_uv_error(true));
-
+        nread = buffer.recvFromSocket(sock->rawFd(), count);
         if (nread == 0) {
             if (sock->type() == SockNum::Sock_TCP) {
                 emitErr(SockException(Err_eof, "end of file"));
@@ -359,15 +385,10 @@ ssize_t Socket::onRead(const SockNum::Ptr &sock, const BufferRaw::Ptr &) noexcep
             _recv_speed += nread;
         }
 
-        auto count = buffer.setTotalSize(nread);
-        InfoL << count << " " << nread;
-        usleep(30 * 1000);
         LOCK_GUARD(_mtx_event);
         for (auto i = 0u; i < count; ++i) {
             auto &buf = buffer.getBuffer(i);
-            auto &addr = buffer.getAddr(i);
-            // 最后一个字节设置为0
-            buf->data()[buf->size()] = '\0';
+            auto &addr = buffer.getAddress(i);
             try {
                 // 此处捕获异常，目的是防止数据未读尽，epoll边沿触发失效的问题
                 _on_read(buf, (struct sockaddr *)&addr, sizeof addr);
