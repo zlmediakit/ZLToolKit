@@ -88,6 +88,11 @@ void Socket::setOnRead(onReadCB cb) {
     }
 }
 
+void Socket::setOnMultiRead(onMultiReadCB cb) {
+    LOCK_GUARD(_mtx_event);
+    _on_multi_read = std::move(cb);
+}
+
 void Socket::setOnErr(onErrCB cb) {
     LOCK_GUARD(_mtx_event);
     if (cb) {
@@ -282,10 +287,10 @@ public:
         , _buffers(count)
         , _address(count) {
         for (auto i = 0u; i < count; ++i) {
-            auto &buf = _buffers[i];
-            buf = BufferRaw::create();
+            auto buf = BufferRaw::create();
             buf->setCapacity(size);
 
+            _buffers[i] = buf;
             auto &mmsg = _mmsgs[i];
             auto &addr = _address[i];
             mmsg.msg_len = 0;
@@ -318,14 +323,14 @@ public:
             auto &mmsg = _mmsgs[i];
             nread += mmsg.msg_len;
 
-            auto &buf = _buffers[i];
+            auto buf = static_pointer_cast<BufferRaw>(_buffers[i]);
             buf->setSize(mmsg.msg_len);
             buf->data()[mmsg.msg_len] = '\0';
         }
         return nread;
     }
 
-    const BufferRaw::Ptr &getBuffer(size_t index) const { return _buffers[index]; }
+    const Buffer::Ptr &getBuffer(size_t index) const { return _buffers[index]; }
 
     const struct sockaddr_storage &getAddress(size_t index) const { return _address[index]; }
 
@@ -344,7 +349,7 @@ private:
 private:
     std::vector<struct iovec> _iovec;
     std::vector<struct mmsghdr> _mmsgs;
-    std::vector<BufferRaw::Ptr> _buffers;
+    std::vector<Buffer::Ptr> _buffers;
     std::vector<struct sockaddr_storage> _address;
 };
 
@@ -386,14 +391,20 @@ ssize_t Socket::onRead(const SockNum::Ptr &sock, const BufferRaw::Ptr &) noexcep
         }
 
         LOCK_GUARD(_mtx_event);
-        for (auto i = 0u; i < count; ++i) {
-            auto &buf = buffer.getBuffer(i);
-            auto &addr = buffer.getAddress(i);
-            try {
-                // 此处捕获异常，目的是防止数据未读尽，epoll边沿触发失效的问题
-                _on_read(buf, (struct sockaddr *)&addr, sizeof addr);
-            } catch (std::exception &ex) {
-                ErrorL << "Exception occurred when emit on_read: " << ex.what();
+        if (_on_multi_read) {
+            auto &buf = buffer.getBuffer(0);
+            auto &addr = buffer.getAddress(0);
+            _on_multi_read(&buf, &addr, count);
+        } else {
+            for (auto i = 0u; i < count; ++i) {
+                auto &buf = buffer.getBuffer(i);
+                auto &addr = buffer.getAddress(i);
+                try {
+                    // 此处捕获异常，目的是防止数据未读尽，epoll边沿触发失效的问题
+                    _on_read(buf, (struct sockaddr *)&addr, sizeof addr);
+                } catch (std::exception &ex) {
+                    ErrorL << "Exception occurred when emit on_read: " << ex.what();
+                }
             }
         }
     }

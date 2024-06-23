@@ -283,6 +283,8 @@ public:
     using Ptr = std::shared_ptr<Socket>;
     //接收数据回调
     using onReadCB = std::function<void(const Buffer::Ptr &buf, struct sockaddr *addr, int addr_len)>;
+    using onMultiReadCB = std::function<void(const Buffer::Ptr *buf, const struct sockaddr_storage *addr, size_t count)>;
+
     //发生错误回调
     using onErrCB = std::function<void(const SockException &err)>;
     //tcp监听接收到连接请求
@@ -352,6 +354,7 @@ public:
      * @param cb 回调对象
      */
     void setOnRead(onReadCB cb);
+    void setOnMultiRead(onMultiReadCB cb);
 
     /**
      * 设置异常事件(包括eof等)回调
@@ -566,6 +569,7 @@ private:
     onErrCB _on_err;
     //收到数据事件
     onReadCB _on_read;
+    onMultiReadCB _on_multi_read;
     //socket缓存清空事件(可用于发送流速控制)
     onFlush _on_flush;
     //tcp监听收到accept请求事件
