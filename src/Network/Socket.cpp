@@ -319,7 +319,7 @@ public:
     }
 
     ssize_t recvFromSocket(int fd, ssize_t &count) {
-        for (auto i = 0u; i < _mmsgs.size(); ++i) {
+        for (auto i = 0; i < _last_count; ++i) {
             auto &mmsg = _mmsgs[i];
             mmsg.msg_hdr.msg_namelen = sizeof(struct sockaddr_storage);
             auto &buf = _buffers[i];
@@ -334,6 +334,7 @@ public:
             count = recvmmsg(fd, &_mmsgs[0], _mmsgs.size(), 0, nullptr);
         } while (-1 == count && UV_EINTR == get_uv_error(true));
 
+        _last_count = count;
         if (count <= 0) {
             return count;
         }
@@ -368,6 +369,7 @@ private:
 
 private:
     size_t _size;
+    ssize_t _last_count { 0 };
     std::vector<struct iovec> _iovec;
     std::vector<struct mmsghdr> _mmsgs;
     std::vector<Buffer::Ptr> _buffers;
