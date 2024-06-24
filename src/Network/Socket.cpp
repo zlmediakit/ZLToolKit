@@ -80,17 +80,28 @@ Socket::~Socket() {
 }
 
 void Socket::setOnRead(onReadCB cb) {
-    LOCK_GUARD(_mtx_event);
+    onMultiReadCB cb2;
     if (cb) {
-        _on_read = std::move(cb);
-    } else {
-        _on_read = [](const Buffer::Ptr &buf, struct sockaddr *, int) { WarnL << "Socket not set read callback, data ignored: " << buf->size(); };
+        cb2 = [cb](Buffer::Ptr *buf, struct sockaddr_storage *addr, size_t count) {
+            for (auto i = 0u; i < count; ++i) {
+                cb(buf[i], (struct sockaddr *)(addr + i), sizeof(struct sockaddr_storage));
+            }
+        };
     }
+    setOnMultiRead(std::move(cb2));
 }
 
 void Socket::setOnMultiRead(onMultiReadCB cb) {
     LOCK_GUARD(_mtx_event);
-    _on_multi_read = std::move(cb);
+    if (cb) {
+        _on_multi_read = std::move(cb);
+    } else {
+        _on_multi_read = [](Buffer::Ptr *buf, struct sockaddr_storage *addr, size_t count) {
+            for (auto i = 0u; i < count; ++i) {
+                WarnL << "Socket not set read callback, data ignored: " << buf[i]->size();
+            }
+        };
+    }
 }
 
 void Socket::setOnErr(onErrCB cb) {
@@ -400,22 +411,14 @@ ssize_t Socket::onRead(const SockNum::Ptr &sock, const BufferRaw::Ptr &) noexcep
             _recv_speed += nread;
         }
 
-        LOCK_GUARD(_mtx_event);
-        if (_on_multi_read) {
-            auto &buf = buffer.getBuffer(0);
-            auto &addr = buffer.getAddress(0);
+        auto &buf = buffer.getBuffer(0);
+        auto &addr = buffer.getAddress(0);
+        try {
+            // 此处捕获异常，目的是防止数据未读尽，epoll边沿触发失效的问题
+            LOCK_GUARD(_mtx_event);
             _on_multi_read(&buf, &addr, count);
-        } else {
-            for (auto i = 0u; i < count; ++i) {
-                auto &buf = buffer.getBuffer(i);
-                auto &addr = buffer.getAddress(i);
-                try {
-                    // 此处捕获异常，目的是防止数据未读尽，epoll边沿触发失效的问题
-                    _on_read(buf, (struct sockaddr *)&addr, sizeof addr);
-                } catch (std::exception &ex) {
-                    ErrorL << "Exception occurred when emit on_read: " << ex.what();
-                }
-            }
+        } catch (std::exception &ex) {
+            ErrorL << "Exception occurred when emit on_read: " << ex.what();
         }
     }
     return 0;
