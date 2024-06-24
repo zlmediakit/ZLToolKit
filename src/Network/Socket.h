@@ -282,8 +282,8 @@ class Socket : public std::enable_shared_from_this<Socket>, public noncopyable, 
 public:
     using Ptr = std::shared_ptr<Socket>;
     //接收数据回调
-    using onReadCB = std::function<void(const Buffer::Ptr &buf, struct sockaddr *addr, int addr_len)>;
-    using onMultiReadCB = std::function<void(const Buffer::Ptr *buf, const struct sockaddr_storage *addr, size_t count)>;
+    using onReadCB = std::function<void(Buffer::Ptr &buf, struct sockaddr *addr, int addr_len)>;
+    using onMultiReadCB = std::function<void(Buffer::Ptr *buf, struct sockaddr_storage *addr, size_t count)>;
 
     //发生错误回调
     using onErrCB = std::function<void(const SockException &err)>;

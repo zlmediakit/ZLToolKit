@@ -282,7 +282,8 @@ public:
 #endif
 
     MMsgBuffer(size_t count, size_t size)
-        : _iovec(count)
+        : _size(size)
+        , _iovec(count)
         , _mmsgs(count)
         , _buffers(count)
         , _address(count) {
@@ -307,8 +308,16 @@ public:
     }
 
     ssize_t recvFromSocket(int fd, ssize_t &count) {
-        for (auto &mmsg : _mmsgs) {
+        for (auto i = 0u; i < _mmsgs.size(); ++i) {
+            auto &mmsg = _mmsgs[i];
             mmsg.msg_hdr.msg_namelen = sizeof(struct sockaddr_storage);
+            auto &buf = _buffers[i];
+            if (!buf) {
+                auto raw = BufferRaw::create();
+                raw->setCapacity(_size);
+                buf = raw;
+                mmsg.msg_hdr.msg_iov->iov_base = buf->data();
+            }
         }
         do {
             count = recvmmsg(fd, &_mmsgs[0], _mmsgs.size(), 0, nullptr);
@@ -330,9 +339,9 @@ public:
         return nread;
     }
 
-    const Buffer::Ptr &getBuffer(size_t index) const { return _buffers[index]; }
+    Buffer::Ptr &getBuffer(size_t index) { return _buffers[index]; }
 
-    const struct sockaddr_storage &getAddress(size_t index) const { return _address[index]; }
+    struct sockaddr_storage &getAddress(size_t index) { return _address[index]; }
 
 private:
 #if !defined(__linux)
@@ -347,6 +356,7 @@ private:
 #endif
 
 private:
+    size_t _size;
     std::vector<struct iovec> _iovec;
     std::vector<struct mmsghdr> _mmsgs;
     std::vector<Buffer::Ptr> _buffers;
