@@ -518,7 +518,7 @@ private:
 
     void setSock(SockNum::Ptr sock);
     int onAccept(const SockNum::Ptr &sock, int event) noexcept;
-    ssize_t onRead(const SockNum::Ptr &sock, const BufferRaw::Ptr &buffer) noexcept;
+    ssize_t onRead(const SockNum::Ptr &sock, const SocketRecvBuffer::Ptr &buffer) noexcept;
     void onWriteAble(const SockNum::Ptr &sock);
     void onConnected(const SockNum::Ptr &sock, const onErrCB &cb);
     void onFlushed();
